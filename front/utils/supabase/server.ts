@@ -1,42 +1,41 @@
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
-import { cookies } from "next/headers";
+import { type NextRequest, NextResponse } from 'next/server';
 
-export const createClient = () => {
-  try {
-    const cookieStore = cookies();
+export const createClient = (request: NextRequest) => {
+  let response = NextResponse.next({
+    request: {
+      headers: request.headers,
+    },
+  });
 
-    return createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          get(name: string) {
-            try {
-              return cookieStore.get(name)?.value ?? '';
-            } catch (error) {
-              console.error('Error getting cookie:', error);
-              return '';
-            }
-          },
-          set(name: string, value: string, options: CookieOptions) {
-            try {
-              cookieStore.set(name, value, options);
-            } catch (error) {
-              console.error('Error setting cookie:', error);
-            }
-          },
-          remove(name: string, options: CookieOptions) {
-            try {
-              cookieStore.delete(name, options);
-            } catch (error) {
-              console.error('Error removing cookie:', error);
-            }
-          },
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return request.cookies.get(name)?.value;
         },
-      }
-    );
-  } catch (error) {
-    console.error('Error creating Supabase client:', error);
-    throw error;
-  }
+        set(name: string, value: string, options: CookieOptions) {
+          response.cookies.set({
+            name,
+            value,
+            ...options,
+            // Ensure secure settings in production
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'lax',
+            httpOnly: true,
+            path: '/'
+          });
+        },
+        remove(name: string, options: CookieOptions) {
+          response.cookies.delete({
+            name,
+            ...options,
+            path: '/'
+          });
+        },
+      },
+    }
+  );
 };

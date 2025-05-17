@@ -1,5 +1,5 @@
-import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { createClient } from './utils/supabase/server'
 
 // Define route patterns
 const PUBLIC_ROUTES = ['/', '/sign-in', '/sign-up', '/forgot-password']
@@ -24,53 +24,14 @@ const withTimeout = <T>(promise: Promise<T>, ms: number): Promise<T> => {
 
 export async function middleware(request: NextRequest) {
   try {
-    // Create a response object that we can modify
-    let response = NextResponse.next({
-      request: {
-        headers: request.headers,
-      },
-    })
-
     // Skip middleware for static routes
     const pathname = request.nextUrl.pathname
     if (STATIC_ROUTES.some(route => pathname.startsWith(route))) {
-      return response
+      return NextResponse.next()
     }
 
-    // Initialize Supabase client with enhanced error handling
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          get(name: string) {
-            return request.cookies.get(name)?.value
-          },
-          set(name: string, value: string, options: CookieOptions) {
-            // Ensure secure cookie settings
-            response.cookies.set({
-              name,
-              value,
-              ...options,
-              secure: process.env.NODE_ENV === 'production',
-              sameSite: 'lax',
-              httpOnly: true,
-            })
-          },
-          remove(name: string, options: CookieOptions) {
-            response.cookies.set({
-              name,
-              value: '',
-              ...options,
-              maxAge: 0,
-              secure: process.env.NODE_ENV === 'production',
-              sameSite: 'lax',
-              httpOnly: true,
-            })
-          },
-        },
-      }
-    )
+    // Initialize Supabase client
+    const supabase = createClient(request)
 
     // Check auth status with timeout
     const { data: { user }, error: authError } = await withTimeout(
@@ -80,19 +41,21 @@ export async function middleware(request: NextRequest) {
 
     if (authError) {
       console.error('Auth error:', authError)
-      // Clear auth cookies on error
-      response.cookies.set({
-        name: 'supabase-auth-token',
-        value: '',
-        maxAge: 0,
-        path: '/',
-      })
       return NextResponse.redirect(new URL('/sign-in', request.url))
     }
 
     // Route protection logic
     const isAuthPage = PUBLIC_ROUTES.some(route => pathname.startsWith(route))
     const isProtectedRoute = PROTECTED_ROUTES.some(route => pathname.startsWith(route))
+
+    // Create base response
+    let response = NextResponse.next()
+
+    // Add user context to headers for server components if user exists
+    if (user) {
+      response.headers.set('x-user-id', user.id)
+      response.headers.set('x-user-role', user.role || 'user')
+    }
 
     // Redirect authenticated users away from auth pages
     if (isAuthPage && user) {
@@ -103,12 +66,6 @@ export async function middleware(request: NextRequest) {
     if (isProtectedRoute && !user) {
       const returnUrl = encodeURIComponent(pathname)
       return NextResponse.redirect(new URL(`/sign-in?returnUrl=${returnUrl}`, request.url))
-    }
-
-    // Add user context to headers for server components
-    if (user) {
-      response.headers.set('x-user-id', user.id)
-      response.headers.set('x-user-role', user.role || 'user')
     }
 
     return response
@@ -129,11 +86,7 @@ export async function middleware(request: NextRequest) {
       return NextResponse.redirect(new URL('/sign-in?error=auth', request.url))
     }
 
-    return NextResponse.next({
-      request: {
-        headers: request.headers,
-      },
-    })
+    return NextResponse.next()
   }
 }
 

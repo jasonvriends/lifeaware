@@ -5,6 +5,11 @@ const nextConfig = {
       allowedOrigins: ['localhost:3000'],
     },
   },
+  logging: {
+    fetches: {
+      fullUrl: true,
+    },
+  },
 };
 
 module.exports = nextConfig; 
