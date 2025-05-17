@@ -142,6 +142,38 @@ export const deleteUserAction = async (userId: string) => {
   const supabase = await createClient();
   
   try {
+    // Get the current user to verify authorization
+    const { data: { user } } = await supabase.auth.getUser();
+    
+    if (!user) {
+      return redirect("/profile?error=You+must+be+logged+in");
+    }
+    
+    // SECURITY CHECK: Ensure users can only delete their own accounts
+    if (user.id !== userId) {
+      return redirect("/profile?error=Unauthorized.+You+can+only+delete+your+own+account");
+    }
+    
+    // First try using our Edge Function for deletion (most reliable method)
+    const response = await fetch(`${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/delete-user`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`,
+      },
+      body: JSON.stringify({ userId }),
+    });
+
+    if (response.ok) {
+      // Edge function successfully deleted the user
+      // Sign out the user
+      await supabase.auth.signOut();
+      return redirect("/sign-in");
+    }
+
+    // If edge function fails, fallback to our other methods
+    console.error("Edge function failed to delete user, falling back to alternative methods");
+    
     // Get profile data to check for avatar
     const { data: profileData } = await supabase
       .from("profiles")
@@ -153,21 +185,34 @@ export const deleteUserAction = async (userId: string) => {
     if (profileData?.avatar_url) {
       await supabase
         .storage
-        .from("profile-avatars")
+        .from("avatars")
         .remove([profileData.avatar_url]);
     }
     
-    // Delete user profile 
+    // Delete profile record
     await supabase
       .from("profiles")
       .delete()
       .eq("id", userId);
 
-    // Delete the user account using admin API
-    const { error } = await supabase.auth.admin.deleteUser(userId);
-    
-    if (error) {
-      throw error;
+    // Try using admin API
+    try {
+      const { error } = await supabase.auth.admin.deleteUser(userId);
+      
+      if (error) {
+        console.error("Admin delete failed, trying alternative method:", error);
+        throw error;
+      }
+    } catch (error) {
+      console.error("Admin delete failed, trying service role function:", error);
+      
+      // Try using RPC function
+      const { error: rpcError } = await supabase.rpc('delete_user_auth', { user_id: userId });
+      
+      if (rpcError) {
+        console.error("RPC delete failed:", rpcError);
+        throw rpcError;
+      }
     }
     
     // Sign out the user
@@ -175,11 +220,7 @@ export const deleteUserAction = async (userId: string) => {
     return redirect("/sign-in");
   } catch (error: any) {
     console.error("Error deleting user:", error.message);
-    return encodedRedirect(
-      "error", 
-      "/profile", 
-      "Failed to delete account: " + error.message
-    );
+    return redirect(`/profile?error=${encodeURIComponent("Failed to delete account: " + error.message)}`);
   }
 };
 
@@ -188,7 +229,7 @@ export async function updateProfileAction(formData: FormData) {
   const { data: { user } } = await supabase.auth.getUser();
   
   if (!user) {
-    redirect("/profile?error=You+must+be+logged+in");
+    return { success: false, message: "You must be logged in" };
   }
   
   try {
@@ -197,6 +238,8 @@ export async function updateProfileAction(formData: FormData) {
     const email = formData.get("email")?.toString();
     const bio = formData.get("bio")?.toString();
     const website = formData.get("website")?.toString();
+    const timezone = formData.get("timezone")?.toString();
+    const dateOfBirth = formData.get("dateOfBirth")?.toString();
     
     // Update auth user metadata (display name)
     if (displayName) {
@@ -212,8 +255,25 @@ export async function updateProfileAction(formData: FormData) {
       updated_at: new Date().toISOString()
     };
     
-    if (bio) profileData.bio = bio;
-    if (website) profileData.website = website;
+    // Handle bio - allow empty strings to clear the field
+    if (bio !== undefined) {
+      profileData.bio = bio || null;
+    }
+    
+    // Handle timezone
+    if (timezone !== undefined) {
+      profileData.timezone = timezone || null;
+    }
+    
+    // Handle date of birth
+    if (dateOfBirth !== undefined) {
+      profileData.date_of_birth = dateOfBirth || null;
+    }
+    
+    // Handle website(s) data
+    if (website !== undefined) {
+      profileData.website = !website || website === "" || website === "[]" ? null : website;
+    }
     
     // Update the profiles table if we have any profile data to update
     if (Object.keys(profileData).length > 1) { // > 1 because we always have updated_at
@@ -235,20 +295,18 @@ export async function updateProfileAction(formData: FormData) {
       
       if (emailError) throw emailError;
       
-      // Revalidate the profile page to show updated data
       revalidatePath('/profile');
-      
-      // Use a redirect with a success message
-      redirect("/profile?success=Email+update+link+has+been+sent+to+your+new+email+address");
+      return { 
+        success: true, 
+        message: "Email update link has been sent to your new email address. Please check your email to confirm the change."
+      };
     }
     
-    // Revalidate the profile page to show updated data
     revalidatePath('/profile');
-    
-    // Return a success message without redirect for client-side handling
     return { success: true, message: "Profile updated successfully" };
   } catch (error: any) {
-    console.error("Error updating profile:", error);
+    // Only log the error type, not the full error details
+    console.error("Profile update error:", error.message);
     return { success: false, message: error.message };
   }
 }
@@ -258,7 +316,8 @@ export async function uploadAvatarAction(formData: FormData) {
   const { data: { user } } = await supabase.auth.getUser();
   
   if (!user) {
-    redirect("/profile?error=You+must+be+logged+in");
+    // Return an error instead of redirecting
+    return { success: false, message: "You must be logged in" };
   }
   
   const avatarFile = formData.get("avatar") as File;
