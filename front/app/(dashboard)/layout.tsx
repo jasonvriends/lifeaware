@@ -33,7 +33,11 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 interface UserData {
   displayName: string | null;
   email: string | null;
+  avatarUrl: string | null;
 }
+
+// Custom event for profile updates
+export const USER_PROFILE_UPDATED_EVENT = "user-profile-updated";
 
 export default function DashboardLayout({
   children,
@@ -44,22 +48,62 @@ export default function DashboardLayout({
   const [userData, setUserData] = useState<UserData>({
     displayName: null,
     email: null,
+    avatarUrl: null,
   });
 
-  useEffect(() => {
-    async function getUserData() {
+  // Function to fetch user data
+  const fetchUserData = async () => {
+    try {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       
-      if (user) {
-        setUserData({
-          displayName: user.user_metadata?.display_name || null,
-          email: user.email || null,
-        });
+      if (!user) return;
+
+      // First try to get the avatar from the profiles table
+      let avatarUrl = null;
+      const { data: profileData } = await supabase
+        .from("profiles")
+        .select("avatar_url")
+        .eq("id", user.id)
+        .single();
+        
+      if (profileData?.avatar_url) {
+        const { data: urlData } = await supabase
+          .storage
+          .from("avatars")
+          .getPublicUrl(profileData.avatar_url);
+        avatarUrl = urlData.publicUrl;
       }
+
+      // Set user data
+      setUserData({
+        displayName: user.user_metadata?.display_name || null,
+        email: user.email || null,
+        avatarUrl: avatarUrl,
+      });
+    } catch (error) {
+      console.error("Error fetching user data:", error);
     }
-    
-    getUserData();
+  };
+
+  // Initial data load
+  useEffect(() => {
+    fetchUserData();
+  }, []);
+
+  // Listen for profile update events
+  useEffect(() => {
+    const handleProfileUpdate = () => {
+      fetchUserData();
+    };
+
+    // Add event listener
+    window.addEventListener(USER_PROFILE_UPDATED_EVENT, handleProfileUpdate);
+
+    // Clean up
+    return () => {
+      window.removeEventListener(USER_PROFILE_UPDATED_EVENT, handleProfileUpdate);
+    };
   }, []);
 
   // Generate initials from display name or email
@@ -83,6 +127,7 @@ export default function DashboardLayout({
     { name: 'Goals', href: '/goals', icon: Target },
     { name: 'Health', href: '/health', icon: Activity },
     { name: 'Journal', href: '/journal', icon: BookText },
+    { name: 'Profile', href: '/profile', icon: User },
   ];
 
   return (
@@ -138,7 +183,7 @@ export default function DashboardLayout({
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" className="flex items-center gap-2 w-full justify-start p-2">
                     <Avatar className="h-8 w-8">
-                      <AvatarImage src="" />
+                      <AvatarImage src={userData.avatarUrl || undefined} />
                       <AvatarFallback className="bg-primary/10 text-primary">
                         {getInitials()}
                       </AvatarFallback>
@@ -208,7 +253,7 @@ export default function DashboardLayout({
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
                 <Avatar className="h-8 w-8">
-                  <AvatarImage src="" />
+                  <AvatarImage src={userData.avatarUrl || undefined} />
                   <AvatarFallback className="bg-primary/10 text-primary">
                     {getInitials()}
                   </AvatarFallback>
